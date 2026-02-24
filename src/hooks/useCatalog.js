@@ -1,6 +1,9 @@
 // src/hooks/useCatalog.js
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabaseClient.js";
+import { SupabaseProductRepository } from "../infrastructure/repositories/SupabaseProductRepository.js";
+
+const productRepo = new SupabaseProductRepository(supabase);
 
 export function useCatalog() {
   const [products, setProducts] = useState([]);
@@ -10,27 +13,17 @@ export function useCatalog() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { data, error } = await supabase
-        .from("products")
-        .select(`
-          id, name, description, type, active,
-          limits, requirements, weights, meta,
-          external_apply_url,
-          lender:lender_id (
-            id, name, active, brand_color, website,
-            referral_url, referral_params
-          )
-        `)
-        .eq("active", true)
-        .eq("lender.active", true);
-
-      if (cancelled) return;
-
-      if (error) setErr(error);
-      else setErr(null);
-
-      setProducts(data || []);
-      setLoading(false);
+      try {
+        const data = await productRepo.getActiveProducts();
+        if (!cancelled) {
+          setProducts(data);
+          setErr(null);
+        }
+      } catch (e) {
+        if (!cancelled) setErr(e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     })();
 
     return () => { cancelled = true; };

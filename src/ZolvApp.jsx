@@ -3,6 +3,13 @@ import React, { useMemo, useState } from "react";
 import { useCatalog } from "./hooks/useCatalog";
 import { supabase } from "./lib/supabaseClient.js";
 
+// ===== NUEVO: imports para patrones =====
+import { SupabaseSubmissionRepository } from "./infrastructure/repositories/SupabaseSubmissionRepository.js";
+import { SupabaseRecommendationRepository } from "./infrastructure/repositories/SupabaseRecommendationRepository.js";
+import { EvaluationStrategyFactory } from "./domain/factories/EvaluationStrategyFactory.js";
+import { EvaluationService } from "./application/services/EvaluationService.js";
+import { ZolvController } from "./application/ZolvController.js";
+
 // ===== Constantes y helpers =====
 const HIST = { ninguno: 0, limitado: 1, bueno: 2, excelente: 3 };
 
@@ -36,7 +43,7 @@ function calcularDTI(ingresos, deudas) {
   return Number.isFinite(dti) ? dti : 1;
 }
 
-// Scoring con parsing seguro
+// Scoring con parsing seguro (SE QUEDA: pero ya no se usa para recomendar; lo dejamos por compatibilidad/backup)
 function scoreProducto(p, datos) {
   const r = p.requirements || {};
   const limits = p.limits || {};
@@ -255,6 +262,7 @@ function clientUUID() {
     return v.toString(16);
   });
 }
+
 function buildReferralUrl(product, submissionId) {
   // 1) Prioridad: URL específica del producto
   const base =
@@ -266,9 +274,10 @@ function buildReferralUrl(product, submissionId) {
   if (!base) return "";
 
   // 2) Params del lender (si existen)
-  const lenderParams = product?.lender?.referral_params && typeof product.lender.referral_params === "object"
-    ? product.lender.referral_params
-    : {};
+  const lenderParams =
+    product?.lender?.referral_params && typeof product.lender.referral_params === "object"
+      ? product.lender.referral_params
+      : {};
 
   // 3) UTM del usuario (si entró con UTM)
   const utm = getUTM() || {};
@@ -295,59 +304,21 @@ function buildReferralUrl(product, submissionId) {
   return url.toString();
 }
 
+// ===== NUEVO: Controller + repos =====
+const submissionRepo = new SupabaseSubmissionRepository(supabase);
 
-async function saveSubmissionAndRecs(datos, recomendaciones) {
-  const email = (datos.email ?? "").trim().toLowerCase();
-  const telefono = (datos.telefono ?? "").trim();
+// En tus capturas existe tabla "scores". Si tu repo usa "recommendations", cambia "scores" por "recommendations".
+const recRepo = new SupabaseRecommendationRepository(supabase, "scores");
 
-  // NO mandes id en el upsert
-  const payload = {
-    answers: datos,
-    email: datos.email ?? null,
-    telefono: datos.telefono ?? null,
-    consentimiento: typeof datos.consentimiento === "boolean" ? datos.consentimiento : null,
-    fecha_registro: datos.fechaRegistro ?? null,
-    origen: datos.origen ?? null,
-    utm: getUTM(),
-    user_agent: navigator.userAgent,
-  };
+const strategyFactory = new EvaluationStrategyFactory();
+const evaluationService = new EvaluationService(strategyFactory);
 
-  const { data, error: e1 } = await supabase
-    .from("submissions")
-    .upsert(payload, {
-      onConflict: "email,telefono",
-      ignoreDuplicates: false,
-    })
-    .select("id")
-    .single();
-
-  if (e1) throw e1;
-
-  const realId = data.id;
-
-  const { error: delErr } = await supabase
-    .from("recommendations")
-    .delete()
-    .eq("submission_id", realId);
-
-  if (delErr) throw delErr;
-
-  const rows = recomendaciones.map(({ p, r }, idx) => ({
-    submission_id: realId,
-    product_id: p.id,
-    rank: idx + 1,
-    score: r.score,
-  }));
-
-  const { error: e2 } = await supabase
-    .from("recommendations")
-    .insert(rows, { returning: "minimal" });
-
-  if (e2) throw e2;
-
-  return realId;
-}
-
+const controller = new ZolvController({
+  productRepo: null, // el catálogo ya viene de useCatalog()
+  submissionRepo,
+  recRepo,
+  evaluationService,
+});
 
 // ===== Página principal =====
 export default function ZolvApp() {
@@ -381,13 +352,16 @@ export default function ZolvApp() {
 
   const tipoElegido = !!datos.tipo;
 
+  // ===== MODIFICADO: recomendaciones ahora usan Strategy+Factory vía controller.evaluate() =====
   const recomendaciones = useMemo(() => {
     if (loading || error || !tipoElegido) return [];
-    return (products || [])
-      .filter((p) => isTipoMatch(p, datos.tipo))
-      .map((p) => ({ p, r: scoreProducto(p, datos) }))
-      .filter(({ r }) => r.elegible)
-      .sort((a, b) => b.r.score - a.r.score);
+
+    // Filtramos por tipo elegido (para mantener exactamente tu comportamiento UI)
+    const filtrados = (products || []).filter((p) => isTipoMatch(p, datos.tipo));
+
+    // Controller aplica Strategy + Factory internamente
+    // Retorna array de { p, r } ordenado por score (según nuestro EvaluationService)
+    return controller.evaluate(filtrados, datos, datos.tipo);
   }, [products, datos, loading, error, tipoElegido]);
 
   async function onSubmit(e) {
@@ -430,12 +404,15 @@ export default function ZolvApp() {
       telefono: tel,
       fechaRegistro: new Date().toISOString(),
       origen: "encuesta_zolv",
+      utm: getUTM(),
+      user_agent: navigator.userAgent,
     };
 
     setResultados(recomendaciones);
 
     try {
-      const subId = await saveSubmissionAndRecs(datosParaGuardar, recomendaciones);
+      // ===== MODIFICADO: guardado via Controller (Repository) =====
+      const subId = await controller.saveSubmissionAndRecommendations(datosParaGuardar, recomendaciones);
       setLastSubmissionId(subId);
 
       // Limpia solo los datos de contacto (para no borrar el resto si quieres seguir mostrando resultados)
@@ -449,7 +426,6 @@ export default function ZolvApp() {
       console.error("No se pudo guardar la encuesta:", err);
       alert(`No se pudo guardar. Revisa consola. Error: ${err?.message || "desconocido"}`);
     }
-
 
     document.getElementById("resultados")?.scrollIntoView({ behavior: "smooth" });
   }
@@ -580,7 +556,8 @@ export default function ZolvApp() {
                 <form onSubmit={onSubmit} className="grid sm:grid-cols-2 gap-4 mt-4">
                   <div className="sm:col-span-2">
                     <div className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-brand/10 text-brand text-sm">
-                      Seleccionaste: <strong>{datos.tipo === "tarjeta" ? "Tarjeta de crédito" : "Crédito personal"}</strong>
+                      Seleccionaste:{" "}
+                      <strong>{datos.tipo === "tarjeta" ? "Tarjeta de crédito" : "Crédito personal"}</strong>
                       <button
                         type="button"
                         className="ml-2 px-2 py-1 rounded border border-brand text-brand text-xs hover:bg-brand/10"
@@ -742,7 +719,6 @@ export default function ZolvApp() {
                       <option value="Veracruz">Veracruz</option>
                       <option value="Yucatán">Yucatán</option>
                       <option value="Zacatecas">Zacatecas</option>
-
                     </select>
                   </div>
 
@@ -767,7 +743,6 @@ export default function ZolvApp() {
                       >
                         <option value="consumo">Gastos/consumo</option>
                         <option value="consolidacion">Consolidar deudas</option>
-                      
                       </select>
                     </div>
                   ) : (
@@ -948,7 +923,7 @@ export default function ZolvApp() {
                     <Gauge value={r.score} />
                   </div>
 
-                  {r.razones.length > 0 && (
+                  {r.razones?.length > 0 && (
                     <ul className="mt-3 text-sm text-gray-700 list-disc pl-5 space-y-1">
                       {r.razones.map((z, i) => (
                         <li key={i}>{z}</li>
@@ -983,12 +958,6 @@ export default function ZolvApp() {
                         </span>
                       );
                     })()}
-
-                    {/*"dti_max" in (p.requirements || {}) && (
-                      <span className="text-xs rounded-full px-2 py-1 bg-brand/10 text-brand">
-                        DTI máx: {(p.requirements.dti_max * 100).toFixed(0)}%
-                      </span>
-                    )*/}
                   </div>
 
                   <div className="mt-4 flex gap-2">
@@ -998,7 +967,6 @@ export default function ZolvApp() {
                       onClick={async () => {
                         const url = buildReferralUrl(p, lastSubmissionId);
 
-                        // Si no hay URL configurada, avisamos.
                         if (!url) {
                           alert("Este producto no tiene URL de referido configurada.");
                           return;
@@ -1012,7 +980,7 @@ export default function ZolvApp() {
                               {
                                 submission_id: lastSubmissionId,
                                 product_id: p.id,
-                                context: { button: "cta", page: window.location.pathname, url }
+                                context: { button: "cta", page: window.location.pathname, url },
                               },
                               { returning: "minimal" }
                             );
@@ -1020,13 +988,11 @@ export default function ZolvApp() {
                           console.error("No se pudo registrar el clic:", err.message);
                         }
 
-                        // ✅ Navegación (abre en nueva pestaña)
                         window.open(url, "_blank", "noopener,noreferrer");
                       }}
                     >
                       Iniciar solicitud
                     </button>
-
                   </div>
                 </Card>
               ))}
