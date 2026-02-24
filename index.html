@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="es-MX">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ZOLV – Comparador de crédito</title>
+    <meta name="theme-color" content="#007b89" />
+    <link rel="icon" href="/logo.png" />
+
+    <!-- Loader de analítica/marketing condicionado por cookies -->
+    <script>
+      // Clave donde guardamos preferencias
+      const ZOLV_COOKIE_KEY = "zolv_cookie_prefs_v1";
+
+      // Idempotencia para no cargar dos veces
+      window.__zolvAnalyticsLoaded = false;
+      window.__zolvMktLoaded = false;
+
+      function safeParse(json) {
+        try { return JSON.parse(json); } catch { return null; }
+      }
+
+      function loadScript(src, attrs = {}) {
+        return new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = src;
+          s.async = true;
+          Object.entries(attrs).forEach(([k, v]) => s.setAttribute(k, v));
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+      }
+
+      async function loadAnalyticsIfNeeded() {
+        if (window.__zolvAnalyticsLoaded) return;
+        window.__zolvAnalyticsLoaded = true;
+
+        // EJEMPLO 1: Google Analytics (gtag)
+        // await loadScript("https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX");
+        // window.dataLayer = window.dataLayer || [];
+        // function gtag(){ dataLayer.push(arguments); }
+        // gtag('js', new Date());
+        // gtag('config', 'G-XXXXXXXXXX');
+
+        // EJEMPLO 2: Plausible
+        // await loadScript("https://plausible.io/js/plausible.js", { defer: "", "data-domain": "zolvdigital.com" });
+      }
+
+      async function loadMarketingIfNeeded() {
+        if (window.__zolvMktLoaded) return;
+        window.__zolvMktLoaded = true;
+
+        // EJEMPLOS de pixels/SDK marketing (descomenta y configura uno a la vez):
+        // Meta Pixel:
+        // !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+        // n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;
+        // n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
+        // t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window, document,'script',
+        // 'https://connect.facebook.net/en_US/fbevents.js');
+        // fbq('init', 'XXXXXXXXXXXXXXX'); fbq('track', 'PageView');
+      }
+
+      // Aplica preferencias actuales (si ya existen) lo más pronto posible
+      (function applyStoredPrefsEarly() {
+        const prefs = safeParse(localStorage.getItem(ZOLV_COOKIE_KEY));
+        if (prefs && prefs.necessary) {
+          if (prefs.analytics) loadAnalyticsIfNeeded();
+          if (prefs.marketing) loadMarketingIfNeeded();
+        }
+      })();
+
+      // Escucha cambios que emite el banner de cookies dentro de la app React
+      window.addEventListener("zolv:cookie-prefs", (ev) => {
+        const { analytics, marketing } = ev.detail || {};
+        if (analytics) loadAnalyticsIfNeeded();
+        if (marketing) loadMarketingIfNeeded();
+        if (!analytics) window.__zolvAnalyticsLoaded = false; // Nota: solo evita recarga; no “desinstala” SDKs
+        if (!marketing) window.__zolvMktLoaded = false;
+      });
+    </script>
+  </head>
+  <body class="bg-gray-50">
+    <div id="root"></div>
+
+    <!-- Entrada de Vite (tu app) -->
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
